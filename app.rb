@@ -14,7 +14,7 @@ client = Plaid::Client.new(env: ENV['PLAID_ENV'],
 
 # We store the access_token in memory - in production, store it in a secure
 # persistent data store.
-access_token = nil
+access_token = ENV['PLAID_ACCESS_TOKEN']
 # The payment_token is only relevant for the UK Payment Initiation product.
 # We store the payment_token in memory - in production, store it in a secure
 # persistent data store.
