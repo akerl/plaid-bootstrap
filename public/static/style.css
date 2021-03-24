@@ -21,7 +21,6 @@ body {
 Content at the top of the view
 
 */
-
 .loading-indicator {
   -webkit-animation: rot 1200ms infinite cubic-bezier(0.23, 1.2, 0.32, 1);
   animation: rot 1200ms infinite cubic-bezier(0.23, 1.2, 0.32, 1);
