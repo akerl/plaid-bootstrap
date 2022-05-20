@@ -13,9 +13,16 @@ def creds(account)
   credential.get!("Enter password for #{server} (#{account})").password
 end
 
-client = Plaid::Client.new(env: 'development',
-                           client_id: creds('client_id'),
-                           secret: creds('secret_key'))
+api_configuration = Plaid::Configuration.new do |c|
+  c.server_index = Plaid::Configuration::Environment['development']
+  c.api_key['PLAID-CLIENT-ID'] = creds('client_id')
+  c.api_key['PLAID-SECRET'] = creds('secret_key')
+  c.api_key['Plaid-Version'] = '2020-09-14'
+end
+
+api_client = ::Plaid::ApiClient.new api_configuration
+
+client = ::Plaid::PlaidApi.new(api_client)
 
 account = ENV['PLAID_ACCOUNT']
 
@@ -29,14 +36,14 @@ payment_id = nil
 item_id = nil
 
 def get_link_token(client, token)
-  res = client.link_token.create(
+  res = client.link_token_create(Plaid::LinkTokenCreateRequest.new(
     access_token: token,
     user: { client_user_id: 'akerl' },
     client_name: 'my app',
     country_codes: ['US'],
     language: 'en'
-  )
-  res['link_token']
+  ))
+  res.link_token
 end
 
 link_token = access_token ? get_link_token(client, access_token) : nil
