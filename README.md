@@ -12,7 +12,6 @@ bundle
 # Get your Plaid API creds from https://dashboard.plaid.com/account/keys
 export PLAID_CLIENT_ID=
 export PLAID_SECRET=
-export PLAID_ENV=development
-ruby app.rb
+bundle exec ruby app.rb
 # Go to http://localhost:4567
 ```

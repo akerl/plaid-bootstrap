@@ -14,7 +14,7 @@ def creds(account)
 end
 
 api_configuration = Plaid::Configuration.new do |c|
-  c.server_index = Plaid::Configuration::Environment['development']
+  c.server_index = Plaid::Configuration::Environment['production']
   c.api_key['PLAID-CLIENT-ID'] = creds('client_id')
   c.api_key['PLAID-SECRET'] = creds('secret_key')
   c.api_key['Plaid-Version'] = '2020-09-14'
@@ -25,6 +25,8 @@ api_client = ::Plaid::ApiClient.new api_configuration
 client = ::Plaid::PlaidApi.new(api_client)
 
 account = ENV['PLAID_ACCOUNT']
+products = (ENV['PLAID_PRODUCTS'] || 'transactions').split(',')
+country_codes = (ENV['PLAID_COUNTRY_CODES'] || 'US').split(',')
 
 # We store the access_token in memory - in production, store it in a secure
 # persistent data store.
@@ -57,7 +59,7 @@ post '/api/info' do
   {
     item_id:      item_id,
     access_token: access_token,
-    products:     ENV['PLAID_PRODUCTS'].split(','),
+    products:     products,
   }.to_json
 end
 
@@ -74,7 +76,7 @@ post '/api/set_access_token' do
     )
   access_token = exchange_token_response.access_token
   item_id = exchange_token_response.item_id
-  if ENV['PLAID_PRODUCTS'].split(',').include?('transfer')
+  if products.include?('transfer')
     transfer_id = authorize_and_create_transfer(access_token, client)
   end
   pretty_print_response(exchange_token_response.to_hash)
@@ -102,7 +104,7 @@ get '/api/transactions' do
           cursor: cursor
         }
       )
-      
+
       response = client.transactions_sync(request)
       # Add this page of results
       added += response.added
@@ -382,8 +384,8 @@ post '/api/create_link_token' do
       {
         user: { client_user_id: 'user-id' },
         client_name: 'Plaid Quickstart',
-        products: ENV['PLAID_PRODUCTS'].split(','),
-        country_codes: ENV['PLAID_COUNTRY_CODES'].split(','),
+        products: products,
+        country_codes: country_codes,
         language: 'en',
         redirect_uri: nil_if_empty_envvar('PLAID_REDIRECT_URI')
       }
@@ -465,8 +467,8 @@ post '/api/create_link_token_for_payment' do
       {
         user: { client_user_id: 'user-id' },
         client_name: 'Plaid Quickstart',
-        products: ENV['PLAID_PRODUCTS'].split(','),
-        country_codes: ENV['PLAID_COUNTRY_CODES'].split(','),
+        products: products,
+        country_codes: country_codes,
         language: 'en',
         payment_initiation: { payment_id: payment_id },
         redirect_uri: nil_if_empty_envvar('PLAID_REDIRECT_URI')
@@ -476,7 +478,7 @@ post '/api/create_link_token_for_payment' do
     pretty_print_response(link_response.to_hash)
     content_type :json
     { link_token: link_response.link_token }.to_hash.to_json
-    
+
   rescue Plaid::ApiError => e
     error_response = format_error(e)
     pretty_print_response(error_response)
