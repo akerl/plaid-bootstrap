@@ -13,29 +13,40 @@ def creds(account)
   credential.get!("Enter password for #{server} (#{account})").password
 end
 
-api_configuration = Plaid::Configuration.new do |c|
-  c.server_index = Plaid::Configuration::Environment['production']
-  c.api_key['PLAID-CLIENT-ID'] = creds('client_id')
-  c.api_key['PLAID-SECRET'] = creds('secret_key')
-  c.api_key['Plaid-Version'] = '2020-09-14'
-end
+# disable CSRF warning on localhost due to usage of local /api proxy in react app.
+# delete this for a production application.
+set :protection, :except => [:json_csrf]
 
-api_client = ::Plaid::ApiClient.new api_configuration
+configuration = Plaid::Configuration.new
+configuration.server_index = Plaid::Configuration::Environment[ENV['PLAID_ENV'] || 'production']
+configuration.api_key['PLAID-CLIENT-ID'] = creds('client_id')
+configuration.api_key['PLAID-SECRET'] = creds('secret_key')
+configuration.api_key['Plaid-Version'] = '2020-09-14'
 
-client = ::Plaid::PlaidApi.new(api_client)
+api_client = Plaid::ApiClient.new(
+  configuration
+)
 
 account = ENV['PLAID_ACCOUNT']
-products = (ENV['PLAID_PRODUCTS'] || 'transactions').split(',')
-country_codes = (ENV['PLAID_COUNTRY_CODES'] || 'US').split(',')
+ENV['PLAID_PRODUCTS'] ||= 'transactions'
+ENV['PLAID_COUNTRY_CODES'] ||= 'US'
 
+client = Plaid::PlaidApi.new(api_client)
 # We store the access_token in memory - in production, store it in a secure
 # persistent data store.
 access_token = account ? creds(account) : nil
 # The payment_id is only relevant for the UK Payment Initiation product.
 # We store the payment_token in memory - in production, store it in a secure
 # persistent data store.
+
 payment_id = nil
 item_id = nil
+
+# The authorization_id is only relevant for Transfer ACH product.
+# We store the authorization_id in memory - in production, store it in a secure
+# persistent data store.
+authorization_id = nil
+account_id = nil
 
 def get_link_token(client, token)
   res = client.link_token_create(Plaid::LinkTokenCreateRequest.new(
@@ -59,7 +70,7 @@ post '/api/info' do
   {
     item_id:      item_id,
     access_token: access_token,
-    products:     products,
+    products:     ENV['PLAID_PRODUCTS'].split(','),
   }.to_json
 end
 
@@ -76,9 +87,6 @@ post '/api/set_access_token' do
     )
   access_token = exchange_token_response.access_token
   item_id = exchange_token_response.item_id
-  if products.include?('transfer')
-    transfer_id = authorize_and_create_transfer(access_token, client)
-  end
   pretty_print_response(exchange_token_response.to_hash)
   content_type :json
   exchange_token_response.to_hash.to_json
@@ -95,7 +103,7 @@ get '/api/transactions' do
     added = []
     modified = []
     removed = [] # Removed transaction ids
-    has_more = TRUE
+    has_more = true
     # Iterate through each page of new transaction updates for item
     while has_more
       request = Plaid::TransactionsSyncRequest.new(
@@ -104,7 +112,6 @@ get '/api/transactions' do
           cursor: cursor
         }
       )
-
       response = client.transactions_sync(request)
       # Add this page of results
       added += response.added
@@ -314,6 +321,31 @@ get '/api/assets' do
     pdf: Base64.encode64(File.read(asset_report_pdf)) }.to_json
 end
 
+get '/api/statements' do
+  begin
+    statements_list_request = Plaid::StatementsListRequest.new(
+      {
+        access_token: access_token
+      }
+    )
+    statements_list_response =
+      client.statements_list(statements_list_request)
+    pretty_print_response(statements_list_response.to_hash)
+  rescue Plaid::ApiError => e
+    error_response = format_error(e)
+    pretty_print_response(error_response)
+    content_type :json
+    error_response.to_json
+  end
+  statement_id = statements_list_response.accounts[0].statements[0].statement_id
+  statements_download_request = Plaid::StatementsDownloadRequest.new({ access_token: access_token, statement_id: statement_id })
+  statement_pdf = client.statements_download(statements_download_request)
+
+  content_type :json
+  { json: statements_list_response.to_hash,
+    pdf: Base64.encode64(File.read(statement_pdf)) }.to_json
+end
+
 # rubocop:enable Metrics/BlockLength
 
 # Retrieve high-level information about an Item
@@ -346,13 +378,86 @@ end
 # This functionality is only relevant for the ACH Transfer product.
 # Retrieve Transfer for a specified Transfer ID
 
-get '/api/transfer' do
+get '/api/transfer_authorize' do
   begin
-    transfer_get_request = Plaid::TransferGetRequest.new({ transfer_id: transfer_id })
-    transfer_get_response = client.transfer_get(transfer_get_request)
-    pretty_print_response(transfer_get_response.to_hash)
+    # We call /accounts/get to obtain first account_id - in production,
+    # account_id's should be persisted in a data store and retrieved
+    # from there.
+    accounts_get_request = Plaid::AccountsGetRequest.new({ access_token: access_token })
+    accounts_get_response = client.accounts_get(accounts_get_request)
+    account_id = accounts_get_response.accounts[0].account_id
+
+    transfer_authorization_create_request = Plaid::TransferAuthorizationCreateRequest.new({
+      access_token: access_token,
+      account_id: account_id,
+      type: 'debit',
+      network: 'ach',
+      amount: '1.00',
+      ach_class: 'ppd',
+      user: {
+        legal_name: 'FirstName LastName',
+        email_address: 'foobar@email.com',
+        address: {
+          street: '123 Main St.',
+          city: 'San Francisco',
+          region: 'CA',
+          postal_code: '94053',
+          country: 'US'
+        }
+      },
+    })
+    transfer_authorization_create_response = client.transfer_authorization_create(transfer_authorization_create_request)
+    pretty_print_response(transfer_authorization_create_response.to_hash)
+    authorization_id = transfer_authorization_create_response.authorization.id
     content_type :json
-    { error: nil, transfer: transfer_get_response.transfer.to_hash}.to_json
+    transfer_authorization_create_response.to_hash.to_json
+  rescue Plaid::ApiError => e
+    error_response = format_error(e)
+    pretty_print_response(error_response)
+    content_type :json
+    error_response.to_json
+  end
+end
+
+get '/api/signal_evaluate' do
+  begin
+    # We call /accounts/get to obtain first account_id - in production,
+    # account_id's should be persisted in a data store and retrieved
+    # from there.
+    accounts_get_request = Plaid::AccountsGetRequest.new({ access_token: access_token })
+    accounts_get_response = client.accounts_get(accounts_get_request)
+    account_id = accounts_get_response.accounts[0].account_id
+
+    signal_evaluate_request = Plaid::SignalEvaluateRequest.new({
+      access_token: access_token,
+      account_id: account_id,
+      client_transaction_id: 'tx1234',
+      amount: 100.00
+    })
+    signal_evaluate_response = client.signal_evaluate(signal_evaluate_request)
+    pretty_print_response(signal_evaluate_response.to_hash)
+    content_type :json
+    signal_evaluate_response.to_hash.to_json
+  rescue Plaid::ApiError => e
+    error_response = format_error(e)
+    pretty_print_response(error_response)
+    content_type :json
+    error_response.to_json
+  end
+end
+
+get '/api/transfer_create' do
+  begin
+      transfer_create_request = Plaid::TransferCreateRequest.new({
+      access_token: access_token,
+      account_id: account_id,
+      authorization_id: authorization_id,
+      description: 'Debit'
+    })
+    transfer_create_response = client.transfer_create(transfer_create_request)
+    pretty_print_response(transfer_create_response.to_hash)
+    content_type :json
+    transfer_create_response.to_hash.to_json
   rescue Plaid::ApiError => e
     error_response = format_error(e)
     pretty_print_response(error_response)
@@ -384,12 +489,20 @@ post '/api/create_link_token' do
       {
         user: { client_user_id: 'user-id' },
         client_name: 'Plaid Quickstart',
-        products: products,
-        country_codes: country_codes,
+        products: ENV['PLAID_PRODUCTS'].split(','),
+        country_codes: ENV['PLAID_COUNTRY_CODES'].split(','),
         language: 'en',
         redirect_uri: nil_if_empty_envvar('PLAID_REDIRECT_URI')
       }
     )
+    if ENV['PLAID_PRODUCTS'].split(',').include?("statements")
+      today = Date.today
+      statements = Plaid::LinkTokenCreateRequestStatements.new(
+        end_date: today,
+        start_date: today-30
+      )
+      link_token_create_request.statements=statements
+    end
     link_response = client.link_token_create(link_token_create_request)
     pretty_print_response(link_response.to_hash)
     content_type :json
@@ -412,10 +525,13 @@ def nil_if_empty_envvar(field)
   end
 end
 
-# This functionality is only relevant for the UK Payment Initiation product.
+# This functionality is only relevant for the UK/EU Payment Initiation product.
 # Sets the payment token in memory on the server side. We generate a new
 # payment token so that the developer is not required to supply one.
 # This makes the quickstart easier to use.
+# See:
+# - https://plaid.com/docs/payment-initiation/
+# - https://plaid.com/docs/#payment-initiation-create-link-token-request
 post '/api/create_link_token_for_payment' do
   begin
     payment_initiation_recipient_create_request = Plaid::PaymentInitiationRecipientCreateRequest.new(
@@ -465,12 +581,24 @@ post '/api/create_link_token_for_payment' do
 
     link_token_create_request = Plaid::LinkTokenCreateRequest.new(
       {
-        user: { client_user_id: 'user-id' },
-        client_name: 'Plaid Quickstart',
-        products: products,
-        country_codes: country_codes,
+        client_name: 'Plaid Quickstart',  
+        user: { 
+          # This should correspond to a unique id for the current user.
+          # Typically, this will be a user ID number from your application.
+          # Personally identifiable information, such as an email address or phone number, should not be used here.
+          client_user_id: 'user-id' 
+        },
+        
+        # Institutions from all listed countries will be shown.
+        country_codes: ENV['PLAID_COUNTRY_CODES'].split(','),
         language: 'en',
-        payment_initiation: { payment_id: payment_id },
+
+        # The 'payment_initiation' product has to be the only element in the 'products' list.
+        products: ['payment_initiation'],
+        
+        payment_initiation: { 
+          payment_id: payment_id 
+        },
         redirect_uri: nil_if_empty_envvar('PLAID_REDIRECT_URI')
       }
     )
@@ -478,7 +606,7 @@ post '/api/create_link_token_for_payment' do
     pretty_print_response(link_response.to_hash)
     content_type :json
     { link_token: link_response.link_token }.to_hash.to_json
-
+    
   rescue Plaid::ApiError => e
     error_response = format_error(e)
     pretty_print_response(error_response)
@@ -501,73 +629,4 @@ end
 
 def pretty_print_response(response)
   puts JSON.pretty_generate(response)
-end
-
-# This is a helper function to authorize and create a Transfer after successful
-# exchange of a public_token for an access_token. The TRANSFER_ID is then used
-# to obtain the data about that particular Transfer.
-def authorize_and_create_transfer(access_token, client)
-  begin
-    # We call /accounts/get to obtain first account_id - in production,
-    # account_id's should be persisted in a data store and retrieved
-    # from there.
-    accounts_get_request = Plaid::AccountsGetRequest.new({ access_token: access_token })
-    accounts_get_response = client.accounts_get(accounts_get_request)
-    account_id = accounts_get_response.accounts[0].account_id
-
-    transfer_authorization_create_request = Plaid::TransferAuthorizationCreateRequest.new({
-      access_token: access_token,
-      account_id: account_id,
-      type: 'credit',
-      network: 'ach',
-      amount: '1.34',
-      ach_class: 'ppd',
-      user: {
-        legal_name: 'FirstName LastName',
-        email_address: 'foobar@email.com',
-        address: {
-          street: '123 Main St.',
-          city: 'San Francisco',
-          region: 'CA',
-          postal_code: '94053',
-          country: 'US'
-        }
-      },
-    })
-    transfer_authorization_create_response = client.transfer_authorization_create(transfer_authorization_create_request)
-    pretty_print_response(transfer_authorization_create_response.to_hash)
-    authorization_id = transfer_authorization_create_response.authorization.id
-
-    transfer_create_request = Plaid::TransferCreateRequest.new({
-      idempotency_key: "1223abc456xyz7890001",
-      access_token: access_token,
-      account_id: account_id,
-      authorization_id: authorization_id,
-      type: 'credit',
-      network: 'ach',
-      amount: '1.34',
-      description: 'Payment',
-      ach_class: 'ppd',
-      user: {
-        legal_name: 'FirstName LastName',
-        email_address: 'foobar@email.com',
-        address: {
-          street: '123 Main St.',
-          city: 'San Francisco',
-          region: 'CA',
-          postal_code: '94053',
-          country: 'US'
-        }
-      },
-    })
-    transfer_create_response = client.transfer_create(transfer_create_request)
-    pretty_print_response(transfer_create_response.to_hash)
-    transfer_id = transfer_create_response.transfer.id
-    return transfer_id
-  rescue Plaid::ApiError => e
-    error_response = format_error(e)
-    pretty_print_response(error_response)
-  end
-
-
 end
