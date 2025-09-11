@@ -28,7 +28,7 @@ api_client = Plaid::ApiClient.new(
 )
 
 account = ENV['PLAID_ACCOUNT']
-ENV['PLAID_PRODUCTS'] ||= 'transactions'
+ENV['PLAID_PRODUCTS'] ||= 'transactions,balance'
 ENV['PLAID_COUNTRY_CODES'] ||= 'US'
 
 client = Plaid::PlaidApi.new(api_client)
